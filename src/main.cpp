@@ -17,17 +17,23 @@ static std::string basenameOf(const std::string& p) {
     return k == std::string::npos ? p : p.substr(k + 1);
 }
 
+static bool endsWith(const std::string& s, const char* suf) {
+    size_t n = strlen(suf);
+    return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+}
+
 static std::string outNameFor(const std::string& input, const std::string& member, bool fromArchive) {
     std::string base = basenameOf(input);
-    size_t dot = base.find_last_of('.');
-    std::string stem = (dot != std::string::npos && dot > 0) ? base.substr(0, dot) : base;
+    auto stripObj = [](std::string s) {
+        if (endsWith(s, ".obj")) s.resize(s.size() - 4);
+        else if (endsWith(s, ".o")) s.resize(s.size() - 2);
+        return s;
+    };
     if (fromArchive) {
-        std::string m = member;
-        size_t md = m.find_last_of('.');
-        std::string ms = (md != std::string::npos && md > 0) ? m.substr(0, md) : m;
-        return stem + "-" + ms + ".s";
+        std::string stem = endsWith(base, ".a") ? base.substr(0, base.size() - 2) : base;
+        return stem + "-" + stripObj(member) + ".s";
     }
-    return stem + ".s";
+    return stripObj(base) + ".s";
 }
 
 struct Module {
