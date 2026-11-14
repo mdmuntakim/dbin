@@ -40,10 +40,12 @@ void initTables() {
     // imm forms (byte / wide) handled inline: 04,0C,...,3D, A8, A9, B0-BF, 68, 6A
 
     // 2-byte map
-    set(op2, 0x00, 0x0D, true);
-    op2[0x0F] = {true, 1}; // 3dnow
+    for (int i = 0x00; i <= 0x03; i++) op2[i] = {true, 0};
+    op2[0x0D] = {true, 0};      // prefetchw
+    op2[0x0F] = {true, 1};      // 3dnow
     set(op2, 0x10, 0x1F, true);
     set(op2, 0x20, 0x25, true);
+    set(op2, 0x90, 0x9F, true);   // SETcc r/m8
     set(op2, 0x28, 0x2F, true);
     set(op2, 0x40, 0x7F, true);
     op2[0xA3] = {true, 0}; op2[0xA4] = {true, 1}; op2[0xA5] = {true, 0};
@@ -66,6 +68,8 @@ void initTables() {
 }
 
 const char* reg8[16]  = {"al","cl","dl","bl","spl","bpl","sil","dil","r8b","r9b","r10b","r11b","r12b","r13b","r14b","r15b"};
+// without a REX prefix the encodings 4..7 are the high-byte registers
+const char* reg8legacy[8] = {"al","cl","dl","bl","ah","ch","dh","bh"};
 const char* reg16[16] = {"ax","cx","dx","bx","sp","bp","si","di","r8w","r9w","r10w","r11w","r12w","r13w","r14w","r15w"};
 const char* reg32[16] = {"eax","ecx","edx","ebx","esp","ebp","esi","edi","r8d","r9d","r10d","r11d","r12d","r13d","r14d","r15d"};
 const char* reg64[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"};
@@ -74,12 +78,12 @@ const char* ccName[16] = {"o","no","b","ae","e","ne","be","a","s","ns","p","np",
 inline int extB(uint8_t rex, int v) { return v + ((rex & 1) ? 8 : 0); }
 inline int extX(uint8_t rex, int v) { return v + ((rex & 2) ? 8 : 0); }
 
-std::string regName(int size, uint8_t rex, int v) {
-    int r = rex ? extB(rex, v) : v;
-    if (size == 8) return std::string(reg8[rex ? r : v]);
-    if (size == 16) return std::string(reg16[r]);
-    if (size == 32) return std::string(reg32[r]);
-    return std::string(reg64[r]);
+std::string regName(int size, int idx) {
+    idx &= 15;
+    if (size == 8) return std::string(reg8[idx]);
+    if (size == 16) return std::string(reg16[idx]);
+    if (size == 32) return std::string(reg32[idx]);
+    return std::string(reg64[idx]);
 }
 
 // read modrm + possible sib/displacement; returns bytes consumed, -1 on truncation
@@ -130,6 +134,10 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
     std::string text;
     bool hasTarget = false, isCall = false, isFlowEnd = false;
     uint64_t target = 0;
+
+    // x86-64 ALU/group immediates are sign-extended imm32 even under REX.W;
+    // only mov r64, imm64 uses a full 8-byte immediate.
+    auto wideImm = [&]() -> int { return opsize16 ? 2 : (bits == 64 ? 4 : osize / 8); };
 
     // helper: ALU/mov reg-reg canonical check
     auto readImm = [&](int n, bool signedImm) -> bool {
@@ -187,7 +195,11 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
             i += 4;
             target = off + i + (uint64_t)(int64_t)rel;
             hasTarget = true;
-            if (!lock && !rep && !repnz && !seg && !opsize16 && !hasRex)
+            // as relaxes a near jcc to its 2-byte short form when the target is
+            // reachable.  The short form is 2 bytes, so its displacement is the
+            // near one + 4; render only when the short form can never fit.
+            if (!lock && !rep && !repnz && !seg && !opsize16 && !hasRex &&
+                ((int64_t)rel + 4 > 127 || (int64_t)rel + 4 < -128))
                 text = std::string("j") + ccName[op2v - 0x80] + " TGT";
         }
         out.len = (uint32_t)i;
@@ -202,8 +214,8 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
         if ((uint64_t)i + (uint64_t)plen + 1 > avail) return false;
         uint8_t mapByte;
         if (op == 0xC5) mapByte = 1;
-        else if (op == 0xC4) mapByte = (uint8_t)(p[i + 1] & 0x1F);
-        else mapByte = (uint8_t)(p[i] & 0x7);
+        else if (op == 0xC4) mapByte = (uint8_t)(p[i] & 0x1F);      // byte1: RXB.mmmmm
+        else mapByte = (uint8_t)(p[i] & 0x0F);                      // EVEX P0: mmmm
         i += (uint64_t)plen;
         if (i >= avail) return false;
         uint8_t vop = p[i++];
@@ -214,6 +226,10 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
         if (map == 1) { needModrm = op2[vop].modrm; immKind = op2[vop].imm; }
         else if (map == 2) { needModrm = true; }
         else { needModrm = true; immKind = 1; }
+        // VEX map-1 opcodes with an imm8 operand
+        if (map == 1 && ((vop >= 0x70 && vop <= 0x73) || vop == 0xC2 ||
+                         vop == 0xC4 || vop == 0xC5 || vop == 0xC6))
+            immKind = 1;
         uint8_t mod, reg, rm;
         if (needModrm) {
             int c = readModrm(p, avail, i, mod, reg, rm);
@@ -254,14 +270,14 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
     if (op == 0x04 || op == 0x0C || op == 0x14 || op == 0x1C || op == 0x24 || op == 0x2C || op == 0x34 || op == 0x3C || op == 0xA8) {
         if (!readImm(1, true)) return false;
     } else if (op == 0x05 || op == 0x0D || op == 0x15 || op == 0x1D || op == 0x25 || op == 0x2D || op == 0x35 || op == 0x3D || op == 0xA9) {
-        if (!readImm(osize / 8, true)) return false;
+        if (!readImm(wideImm(), true)) return false;
     } else if (op >= 0xB0 && op <= 0xB7) {
         if (!readImm(1, true)) return false;
     } else if (op >= 0xB8 && op <= 0xBF) {
         if (bits == 64 && (rex & 8)) { if (!readImm(8, false)) return false; }
         else if (!readImm(osize / 8, false)) return false;
     } else if (op == 0x68) {
-        if (!readImm(osize / 8, true)) return false;
+        if (!readImm(wideImm(), true)) return false;
     } else if (op == 0x6A) {
         if (!readImm(1, true)) return false;
     } else if (op == 0xE8 || op == 0xE9) {
@@ -270,8 +286,11 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
         i += 4;
         target = off + i + (uint64_t)(int64_t)rel;
         hasTarget = true; isCall = (op == 0xE8);
-        if (!lock && !seg && !rep && !repnz && !opsize16)
-            text = std::string(op == 0xE8 ? "call" : "jmp") + " TGT";
+        if (!lock && !seg && !rep && !repnz && !opsize16) {
+            if (op == 0xE8) text = "call TGT";
+            // jmp short is 2 bytes, near is 5: short displacement is rel + 3.
+            else if ((int64_t)rel + 3 > 127 || (int64_t)rel + 3 < -128) text = "jmp TGT";
+        }
     } else if (op == 0xEB) {
         if (!readImm(1, true)) return false;
         // imm is last byte: rel = imm
@@ -293,11 +312,11 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
     } else if (inf.imm == 1) {
         if (!readImm(1, true)) return false;
     } else if (inf.imm == 2) {
-        if (!readImm(osize / 8, true)) return false;
+        if (!readImm(wideImm(), true)) return false;
     } else if (inf.imm == 3) {
         if (!readImm(2, true)) return false;
     } else if (inf.imm == 4 && reg < 2) {
-        if (!readImm(op == 0xF6 ? 1 : osize / 8, true)) return false;
+        if (!readImm(op == 0xF6 ? 1 : wideImm(), true)) return false;
     }
     if (i > avail) return false;
 
@@ -306,16 +325,30 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
         bool memop = inf.modrm && mod != 3;
         auto sfx = [&](int sz) -> const char* { return sz == 8 ? "b" : sz == 16 ? "w" : sz == 32 ? "l" : "q"; };
         if (op >= 0x50 && op <= 0x5F && osize != 16) {
-            const char* r = bits == 64 ? reg64[rex ? extB(rex, op - 0x50) : op - 0x50]
-                                       : reg32[op - 0x50];
+            const char* r = bits == 64 ? reg64[rex ? extB(rex, op & 7) : (op & 7)]
+                                       : reg32[op & 7];
             text = std::string(op < 0x58 ? "push %" : "pop %") + r;
         } else if (op == 0xC3 && !opsize16 && !hasRex) { text = "ret"; isFlowEnd = true; }
         else if (op == 0xC9 && !opsize16 && !hasRex) { text = "leave"; }
         else if (op == 0xCC) { text = "int3"; isFlowEnd = true; }
         else if (op == 0x90 && !hasRex && !opsize16) { text = "nop"; }
-        else if (op == 0x98 && !opsize16 && !hasRex) { text = bits == 64 ? "cltq" : "cwde"; }
-        else if (op == 0x99 && !opsize16 && !hasRex) { text = bits == 64 ? "cltd" : "cdq"; }
+        else if (op == 0x98 && !opsize16 && !hasRex) { text = bits == 64 ? "cwtl" : "cwde"; }
+        else if (op == 0x99 && !opsize16 && !hasRex) { text = "cltd"; }
         else if (!memop && inf.modrm && mod == 3) {
+            // register index from field with proper REX extension:
+            //   reg field  <- REX.R (bit2), rm field <- REX.B (bit0)
+            auto regF = [&](int v) { return v + ((rex & 4) ? 8 : 0); };
+            auto rmF  = [&](int v) { return v + ((rex & 1) ? 8 : 0); };
+            auto rn = [&](int sz, int idx) -> std::string {
+                if (sz == 8) {
+                    if (idx >= 8) return std::string(reg8[idx]);
+                    if (hasRex) return std::string(reg8[idx]);
+                    return std::string(reg8legacy[idx]);
+                }
+                if (sz == 16) return std::string(reg16[idx]);
+                if (sz == 32) return std::string(reg32[idx]);
+                return std::string(reg64[idx]);
+            };
             int sz = osize;
             if ((op < 0x40) && (op & 7) <= 3) {
                 static const char* alu[8] = {"add","or","adc","sbb","and","sub","xor","cmp"};
@@ -323,22 +356,23 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
                 int dir = op & 3; // 0: r/m8,r8  1: r/m,r  2: r8,r/m8  3: r,r/m
                 int canonicalDir = sz == 8 ? 0 : 1;
                 if (dir == canonicalDir) {
-                    int dst = dir <= 1 ? (rex ? extB(rex, rm) : rm) : (rex ? extX(rex, reg) : reg);
-                    int src = dir <= 1 ? (rex ? extX(rex, reg) : reg) : (rex ? extB(rex, rm) : rm);
-                    text = std::string(mn) + sfx(sz) + " %" + regName(sz, rex, src) + ", %" + regName(sz, rex, dst);
+                    int dst = dir <= 1 ? rmF(rm) : regF(reg);
+                    int src = dir <= 1 ? regF(reg) : rmF(rm);
+                    text = std::string(mn) + sfx(sz) + " %" + rn(sz, src) + ", %" + rn(sz, dst);
                 }
             } else if (op == 0x84 || op == 0x85) {
-                int r1 = rex ? extX(rex, reg) : reg;
-                int r2 = rex ? extB(rex, rm) : rm;
-                text = std::string("test") + sfx(sz) + " %" + regName(sz, rex, r2) + ", %" + regName(sz, rex, r1);
+                if (op == 0x84) sz = 8;
+                text = std::string("test") + sfx(sz) + " %" + rn(sz, regF(reg)) + ", %" + rn(sz, rmF(rm));
             } else if (op == 0x88) {
-                text = std::string("movb %" ) + regName(8, rex, rex ? extX(rex, reg) : reg) + ", %" + regName(8, rex, rex ? extB(rex, rm) : rm);
+                text = std::string("movb %") + rn(8, regF(reg)) + ", %" + rn(8, rmF(rm));
             } else if (op == 0x89) {
-                text = std::string("mov") + sfx(sz) + " %" + regName(sz, rex, rex ? extX(rex, reg) : reg) + ", %" + regName(sz, rex, rex ? extB(rex, rm) : rm);
+                text = std::string("mov") + sfx(sz) + " %" + rn(sz, regF(reg)) + ", %" + rn(sz, rmF(rm));
             }
         }
         else if (op >= 0xB0 && op <= 0xB7) {
-            text = std::string("movb $") + std::to_string((int8_t)p[i - 1]) + ", %" + regName(8, rex, op - 0xB0);
+            int idx = (op & 7) + ((rex & 1) ? 8 : 0);
+            text = std::string("movb $") + std::to_string((int8_t)p[i - 1]) + ", %" +
+                   (idx >= 8 ? reg8[idx] : (hasRex ? reg8[idx] : reg8legacy[idx]));
         }
         else if (op >= 0xB8 && op <= 0xBF && osize == 32 && !hasRex) {
             int32_t v; memcpy(&v, p + i - 4, 4);
@@ -351,29 +385,32 @@ bool decodeX86(const uint8_t* p, uint64_t avail, uint64_t off, int bits, Insn& o
         else if (op >= 0x80 && op <= 0x83 && mod == 3) {
             static const char* alu[8] = {"add","or","adc","sbb","and","sub","xor","cmp"};
             const char* mn = alu[reg];
+            int idx = rm + ((rex & 1) ? 8 : 0);
             if (op == 0x80) {
-                text = std::string(mn) + "b $" + std::to_string((int8_t)p[i - 1]) + ", %" + regName(8, rex, rex ? extB(rex, rm) : rm);
+                const char* r8 = idx >= 8 ? reg8[idx] : (hasRex ? reg8[idx] : reg8legacy[idx]);
+                text = std::string(mn) + "b $" + std::to_string((int8_t)p[i - 1]) + ", %" + r8;
             } else if (op == 0x83 && osize != 16) {
-                text = std::string(mn) + sfx(osize) + " $" + std::to_string((int8_t)p[i - 1]) + ", %" + regName(osize, rex, rex ? extB(rex, rm) : rm);
+                text = std::string(mn) + sfx(osize) + " $" + std::to_string((int8_t)p[i - 1]) + ", %" + regName(osize, idx);
             } else if (op == 0x83) {
-                text = std::string(mn) + "w $" + std::to_string((int8_t)p[i - 1]) + ", %" + regName(16, rex, rex ? extB(rex, rm) : rm);
+                text = std::string(mn) + "w $" + std::to_string((int8_t)p[i - 1]) + ", %" + reg16[idx];
             } else { // 0x81 with wide imm: as keeps 81 when imm not imm8-fittable
                 int64_t v = 0;
-                int n = opsize16 ? 2 : osize / 8;
+                int n = wideImm();
                 if (n == 2) { int16_t t; memcpy(&t, p + i - 2, 2); v = t; }
                 else { int32_t t; memcpy(&t, p + i - 4, 4); v = t; }
                 if (v < -128 || v > 127)
-                    text = std::string(mn) + sfx(opsize16 ? 16 : osize) + " $" + std::to_string(v) + ", %" + regName(opsize16 ? 16 : osize, rex, rex ? extB(rex, rm) : rm);
+                    text = std::string(mn) + sfx(opsize16 ? 16 : osize) + " $" + std::to_string(v) + ", %" + regName(opsize16 ? 16 : osize, idx);
             }
         }
         else if (op == 0x8D && mod != 3 && rm != 4 && rm != 5 && mod == 1 && !opsize16 && !seg) {
             // lea disp8(base), %reg — no SIB involved, as reassembles identically
             static const char* b32[8] = {"eax","ecx","edx","ebx","esp","ebp","esi","edi"};
-            std::string bn = bits == 64 ? std::string("%") + reg64[rex ? extB(rex, rm) : rm]
-                                        : std::string("%") + b32[rm];
+            int bidx = rm + ((rex & 1) ? 8 : 0);
+            std::string bn = bits == 64 ? std::string("%") + reg64[bidx] : std::string("%") + b32[rm];
             int8_t d = (int8_t)p[i - 1];
             int dsz = osize == 16 ? 16 : (bits == 64 && (rex & 8)) ? 64 : 32;
-            text = std::string("lea") + sfx(dsz) + " " + std::to_string(d) + "(" + bn + "), %" + regName(dsz, rex, rex ? extX(rex, reg) : reg);
+            int ridx = reg + ((rex & 4) ? 8 : 0);
+            text = std::string("lea") + sfx(dsz) + " " + std::to_string(d) + "(" + bn + "), %" + regName(dsz, ridx);
         }
     }
 

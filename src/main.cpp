@@ -62,6 +62,36 @@ static void printUsage() {
         "  reassemblable .s per object module into DIR (default dbin_out).\n");
 }
 
+// raw section dump helper (used by tests; objcopy cannot handle all archs)
+static int dumpSection(const std::string& file, const std::string& sect, const std::string& outPath) {
+    int fd = open(file.c_str(), O_RDONLY);
+    if (fd < 0) { fprintf(stderr, "dbin: cannot open %s\n", file.c_str()); return 1; }
+    struct stat st{};
+    if (fstat(fd, &st) != 0) { close(fd); return 1; }
+    uint64_t sz = (uint64_t)st.st_size;
+    const uint8_t* b = (const uint8_t*)mmap(nullptr, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (b == MAP_FAILED) return 1;
+    ElfImage e;
+    if (!parseElfInto(e, b, sz)) { fprintf(stderr, "dbin: %s: %s\n", file.c_str(), e.error.c_str()); munmap((void*)b, sz); return 1; }
+    for (size_t i = 0; i < e.sections.size(); i++) {
+        if (e.sections[i].name != sect) continue;
+        uint64_t n = 0;
+        const uint8_t* d = e.secBytes((uint32_t)i, n);
+        std::FILE* f = std::fopen(outPath.c_str(), "wb");
+        if (!f) { munmap((void*)b, sz); return 1; }
+        if (d && n) fwrite(d, 1, n, f);
+        std::fclose(f);
+        munmap((void*)b, sz);
+        return 0;
+    }
+    // section absent: write empty file
+    std::FILE* f = std::fopen(outPath.c_str(), "wb");
+    if (f) std::fclose(f);
+    munmap((void*)b, sz);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::string input, outdir = "dbin_out";
     bool json = false, noDisasm = false;
@@ -70,6 +100,7 @@ int main(int argc, char** argv) {
         if (a == "--json") json = true;
         else if (a == "--outdir" && i + 1 < argc) outdir = argv[++i];
         else if (a == "--no-disasm") noDisasm = true;
+        else if (a == "--dump" && i + 3 < argc) return dumpSection(argv[i+1], argv[i+2], argv[i+3]);
         else if (a == "-h" || a == "--help") { printUsage(); return 0; }
         else if (!a.empty() && a[0] == '-' && a != "-") { fprintf(stderr, "dbin: unknown option %s\n", a.c_str()); printUsage(); return 2; }
         else { if (!input.empty()) { fprintf(stderr, "dbin: multiple inputs\n"); return 2; } input = a; }

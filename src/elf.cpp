@@ -46,6 +46,7 @@ bool parseArchive(const uint8_t* base, uint64_t size, std::vector<ArchiveMember>
         }
         if (off + 60 + msize > size) { err = "truncated ar member"; return false; }
         std::string name = cstr(h, 16);
+        while (!name.empty() && name.back() == ' ') name.pop_back();
         uint64_t dataOff = off + 60, dataEnd = dataOff + msize;
         if (name.rfind("/", 0) == 0 && (name == "/" || name == "/ ")) {
             // GNU symbol index, skip
@@ -106,7 +107,7 @@ bool parseElfInto(ElfImage& e, const uint8_t* base, uint64_t size)
     e.be = dat == 2;
     Reader r{base, size, e.be, e.bits};
 
-    uint16_t ver = r.u16(base + 16);
+    uint16_t ver = r.u16(base + 20);
     if (ver != 1) { e.error = "unsupported ELF version"; return false; }
     e.etype = r.u16(base + 16);
     e.machine = r.u16(base + 18);
@@ -225,9 +226,9 @@ bool parseElfInto(ElfImage& e, const uint8_t* base, uint64_t size)
     // relocations
     for (size_t i = 0; i < e.sections.size(); i++) {
         const Section& s = e.sections[i];
-        if (s.type != 4 && s.type != 9) continue; // SHT_REL / SHT_RELA
+        if (s.type != 4 && s.type != 9) continue; // SHT_RELA / SHT_REL
         if (s.offset + s.size > size) continue;
-        bool rela = s.type == 9;
+        bool rela = s.type == 4;
         size_t esz = e.bits == 64 ? (rela ? 24 : 16) : (rela ? 12 : 8);
         size_t count = s.size / esz;
         const uint8_t* p = base + s.offset;
@@ -241,7 +242,7 @@ bool parseElfInto(ElfImage& e, const uint8_t* base, uint64_t size)
             } else {
                 rr.offset = r.u32(q);
                 uint32_t info = r.u32(q + 4);
-                rr.type = info >> 8; rr.sym = info & 0xff;
+                rr.type = info & 0xff; rr.sym = info >> 8;
                 rr.addend = rela ? (int64_t)(int32_t)r.u32(q + 8) : 0;
             }
             v.push_back(rr);
