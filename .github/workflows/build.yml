@@ -69,8 +69,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-user
       - name: Build every Android ABI
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           if [ -z "${ANDROID_NDK_HOME:-}" ]; then
             echo "ANDROID_NDK_HOME is not set on this runner" >&2
