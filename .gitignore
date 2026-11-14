@@ -2,3 +2,8 @@ dbin
 *.o
 *.s.tmp
 dbin_out/
+
+# Build output is never committed, it is published as a release asset.
+build/
+dbin-android-*
+dbin-linux-*

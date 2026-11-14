@@ -4,7 +4,9 @@
 # SPDX-License-Identifier: MIT
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-DBIN="$ROOT/dbin"
+# DBIN may point at a wrapper (qemu-aarch64 ./dbin-android-aarch64) so the
+# Android ABI builds can run through the same gate as the host build.
+DBIN="${DBIN:-$ROOT/dbin}"
 WORK=${WORK:-/tmp/dbin_gate}
 rm -rf "$WORK"; mkdir -p "$WORK"
 CORPUS="$WORK/corpus"; mkdir -p "$CORPUS"

@@ -39,10 +39,37 @@ dbin [--json] [--outdir DIR] [--no-disasm] <file>
 ## Build
 
 ```
-make            # g++ -std=c++17 -O2 -flto -Wl,--gc-sections -s
+make            # host build, g++ -std=c++17 -O2 -flto -Wl,--gc-sections -s
+make static     # the release binary for this host (fully static)
+make android    # Termux/Android: arm64-v8a, armeabi-v7a and x86_64, bionic
+make linux-aarch64   # generic Linux aarch64, needs aarch64-linux-gnu-g++
 ```
 
-Cross builds: `make CXX=aarch64-linux-gnu-g++` etc.
+The Android targets need the NDK (`ANDROID_NDK_HOME`, or an NDK under
+`/usr/local/lib/android/sdk/ndk/`). Every target compiles into its own object
+directory (`build/<target>`), so a cross build never links a host object.
+
+## Android / Termux
+
+**On Termux use `dbin-android-aarch64`** (or `dbin-android-armv7a` on a 32-bit
+device). The `dbin` and `dbin-linux-aarch64` assets are glibc builds for
+ordinary Linux and do not run under Termux.
+
+The 0.1.0 asset `dbin-aarch64` was a generic `aarch64-linux-gnu` static binary
+and died on Android with `unknown signal 31` before printing anything. On arm64
+Linux signal 31 is `SIGSYS`. During startup glibc registers restartable
+sequences with `rseq(2)`; Android's app seccomp allowlist
+(`SECCOMP_ALLOWLIST_APP.TXT` / `SECCOMP_ALLOWLIST_COMMON.TXT` in bionic) does
+not contain `rseq`, so the kernel traps the syscall and kills the process with
+`SIGSYS`. It is not a dbin bug and not something an emulator can mask: with a
+one-line seccomp filter that traps only `rseq`, the glibc build dies with
+`Bad system call (core dumped)` (exit 159 = 128 + 31) and no output, while the
+NDK build runs normally and its syscall trace contains no `rseq`/`clone3`.
+
+Rebuilding against bionic fixes it: bionic never calls `rseq`, so the binary
+stays inside the Android seccomp allowlist. `tests/android-abi.sh` checks this
+on every build — it executes each ABI under qemu-user and fails if `rseq`
+appears in the trace.
 
 ## Status
 
@@ -51,6 +78,9 @@ Cross builds: `make CXX=aarch64-linux-gnu-g++` etc.
 - ELF 32/64 both endians, `.a` archives, stripped and unstripped inputs.
 - Round-trip gate: `tests/roundtrip.sh` builds a corpus and compares reassembled
   section bytes with the originals.
+- Android ABI gate: `tests/android-abi.sh` builds and executes arm64-v8a,
+  armeabi-v7a and x86_64, and runs the full round-trip gate through
+  `qemu-aarch64`.
 
 ## License
 
