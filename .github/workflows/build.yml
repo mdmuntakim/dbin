@@ -71,9 +71,16 @@ jobs:
       - name: Build every Android ABI
         run: |
           if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-            echo "ANDROID_NDK_HOME is not set on this runner" >&2
+            # The runner image may only export ANDROID_HOME / ANDROID_SDK_ROOT.
+            ANDROID_NDK_HOME=$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* \
+              "${ANDROID_SDK_ROOT:-/nonexistent}"/ndk/* 2>/dev/null | sort -V | tail -1)
+            export ANDROID_NDK_HOME
+          fi
+          if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "$ANDROID_NDK_HOME" ]; then
+            echo "no Android NDK found on this runner" >&2
             exit 1
           fi
+          echo "using NDK $ANDROID_NDK_HOME"
           make android
           file dbin-android-aarch64 dbin-android-armv7a dbin-android-x86_64
       - name: Execute every ABI, verify seccomp safety, round-trip

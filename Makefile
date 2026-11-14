@@ -13,7 +13,7 @@ OBJS := $(SRCS:src/%.cpp=$(BUILD)/%.o)
 # A glibc static binary is *not* usable there: glibc calls rseq(2) while the
 # C runtime starts, and the Android seccomp filter traps that syscall, so the
 # process dies from SIGSYS (signal 31) before main() runs.
-NDK ?= $(if $(ANDROID_NDK_HOME),$(ANDROID_NDK_HOME),$(if $(ANDROID_NDK_ROOT),$(ANDROID_NDK_ROOT),$(lastword $(wildcard /usr/local/lib/android/sdk/ndk/*))))
+NDK ?= $(if $(ANDROID_NDK_HOME),$(ANDROID_NDK_HOME),$(if $(ANDROID_NDK_ROOT),$(ANDROID_NDK_ROOT),$(lastword $(wildcard /usr/local/lib/android/sdk/ndk/* $(ANDROID_HOME)/ndk/* $(ANDROID_SDK_ROOT)/ndk/*))))
 NDK_HOST_TAG ?= linux-x86_64
 ANDROID_API ?= 24
 NDK_BIN := $(NDK)/toolchains/llvm/prebuilt/$(NDK_HOST_TAG)/bin
