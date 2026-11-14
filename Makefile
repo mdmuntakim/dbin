@@ -7,10 +7,13 @@ OBJS := $(SRCS:.cpp=.o)
 dbin: $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 
+static: $(OBJS)
+	$(CXX) $(CXXFLAGS) -static -o dbin $(OBJS) $(LDFLAGS)
+
 %.o: %.cpp src/dbin.hpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:
 	rm -f dbin $(OBJS)
 
-.PHONY: clean
+.PHONY: clean static
