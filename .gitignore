@@ -1,0 +1,4 @@
+dbin
+*.o
+*.s.tmp
+dbin_out/
